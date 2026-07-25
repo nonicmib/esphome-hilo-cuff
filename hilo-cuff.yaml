@@ -1,0 +1,535 @@
+substitutions:
+  name: "hilo-cuff-monitor"
+  friendly_name: "Hilo Cuff Monitor"
+  # MAC-Adresse der Manschette (per BLE-Scan ermitteln, siehe README.md).
+  mac_address: "AA:BB:CC:DD:EE:FF"
+  csv_download_url: "/hilo_log.csv"
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  comment: "Steuerung der Hilo/Aktiia Blutdruckmanschette über ODROID-GO (esp32/odroid_esp32)"
+  on_boot:
+    # Läuft nach der Standard-Setup-Phase (WLAN/API/BLE-Client initialisiert)
+    # - signalisiert akustisch, dass der ODROID-GO bereit ist, eine Messung
+    # per START-Taste oder Home Assistant entgegenzunehmen.
+    then:
+      - switch.turn_on: speaker_enable
+      - rtttl.play: "ready:d=8,o=5,b=120:c,e,g"
+
+esp32:
+  board: odroid_esp32
+  framework:
+    type: esp-idf
+    version: recommended
+    # CSV-Logging liegt auf einer eigenen FAT/Wear-Leveling-Partition im
+    # internen Flash (siehe partitions.csv) statt auf einer SD-Karte - so
+    # entfällt der SPI-Bus-Konflikt mit dem Display. "fatfs" und
+    # "wear_levelling" sind Standard-ESP-IDF-Komponenten, die ESPHome nicht
+    # automatisch mit einbindet.
+    advanced:
+      include_builtin_idf_components: ["fatfs", "wear_levelling"]
+  partitions: partitions.csv
+
+# Lädt die eigene Komponente aus dem Unterordner my_components/hilo_cuff.
+external_components:
+  - source:
+      type: local
+      path: my_components
+    components: [hilo_cuff]
+
+logger:
+  level: DEBUG
+
+# Home-Assistant-Anbindung (native API). Alle unten definierten Entities,
+# inkl. Start-Button und Intervall-Einstellungen, erscheinen automatisch
+# in Home Assistant und können dort ausgelöst/verändert werden.
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  # Reduziert den WLAN-Funkverbrauch in Pausen (Akku sparen), ohne die
+  # Verbindung zu trennen - bleibt kompatibel mit HA-Erreichbarkeit und
+  # dem CSV-Download-Webserver.
+  power_save_mode: light
+
+  ap:
+    ssid: "Hilo Fallback Hotspot"
+    password: !secret ap_password
+
+captive_portal:
+
+# Wird von hilo_cuff genutzt, um den CSV-Download-Endpunkt zu registrieren.
+web_server_base:
+  id: web_server_base_id
+
+web_server:
+  id: web_server_id
+  port: 80
+  web_server_base_id: web_server_base_id
+
+# Für Tag/Nacht-Umschaltung der Messintervalle und die Datum/Uhrzeit-Anzeige
+# auf dem Display wird die Uhrzeit benötigt - jetzt von Home Assistant statt SNTP.
+time:
+  - platform: homeassistant
+    id: sntp_time
+    timezone: Europe/Berlin
+
+# BLE-Grundlagen für den esp-idf-Bluetooth-Stack
+esp32_ble_tracker:
+
+# MAC-Adresse jetzt als Substitution (${mac_address}) statt als Secret -
+# so lässt sie sich pro Gerät z. B. über ESPHome-Packages/Dashboard-Import
+# oder direkt oben im substitutions-Block überschreiben.
+ble_client:
+  - mac_address: ${mac_address}
+    id: hilo_ble_client
+
+# Hub-Instanz der eigenen Komponente, verknüpft mit dem ble_client oben.
+hilo_cuff:
+  id: hilo_cuff_hub
+  ble_client_id: hilo_ble_client
+  measurement_timeout: 120s
+  # Nach abgeschlossener Messung (erfolgreich oder mit Fehlercode) automatisch
+  # trennen, um den Akku der Manschette zu schonen.
+  disconnect_after_measurement: true
+  # Optional auch nach einem Timeout (keine Messung erhalten) trennen.
+  disconnect_on_timeout: true
+  # CSV-Logging jeder Messung auf einer eigenen FAT-Partition im internen
+  # Flash (siehe partitions.csv) + Download über den ESPHome-Webserver
+  # unter http://<geraet>/hilo_log.csv
+  csv_logging: true
+  csv_log_path: "/logfs/hilo_log.csv"
+  csv_download_url: "${csv_download_url}"
+  web_server_base_id: web_server_base_id
+  time_id: sntp_time
+
+# --- Konfigurierbare Messintervalle mit Tag/Nacht-Umschaltung -------------
+# 0 min = automatische Messungen für diese Tageszeit deaktiviert.
+number:
+  - platform: template
+    name: "Messintervall Tag"
+    id: interval_day_minutes
+    icon: mdi:weather-sunny
+    unit_of_measurement: min
+    min_value: 0
+    max_value: 720
+    step: 5
+    initial_value: 60
+    optimistic: true
+    restore_value: true
+
+  - platform: template
+    name: "Messintervall Nacht"
+    id: interval_night_minutes
+    icon: mdi:weather-night
+    unit_of_measurement: min
+    min_value: 0
+    max_value: 720
+    step: 5
+    initial_value: 0
+    optimistic: true
+    restore_value: true
+
+  - platform: template
+    name: "Tagbeginn (Stunde)"
+    id: day_start_hour
+    icon: mdi:clock-start
+    min_value: 0
+    max_value: 23
+    step: 1
+    initial_value: 7
+    optimistic: true
+    restore_value: true
+
+  - platform: template
+    name: "Tagende (Stunde)"
+    id: day_end_hour
+    icon: mdi:clock-end
+    min_value: 0
+    max_value: 23
+    step: 1
+    initial_value: 22
+    optimistic: true
+    restore_value: true
+
+  - platform: template
+    name: "Display Timeout"
+    id: display_timeout_minutes
+    icon: mdi:monitor-lock
+    unit_of_measurement: min
+    min_value: 0
+    max_value: 60
+    step: 1
+    initial_value: 5
+    optimistic: true
+    restore_value: true
+    # 0 = Hintergrundbeleuchtung nie automatisch ausschalten
+
+switch:
+  - platform: template
+    name: "Automatische Messungen"
+    id: auto_measurement_enabled
+    icon: mdi:autorenew
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+
+  # GPIO25 ist beim ODROID-GO die SPEAKER_ENABLE-Leitung des Verstärkers -
+  # bleibt standardmäßig AUS und wird nur unmittelbar vor jeder Wiedergabe
+  # (on_boot, start_measurement_button, bp_status) eingeschaltet, dann per
+  # rtttl.on_finished_playback (siehe unten) wieder ausgeschaltet.
+  - platform: output
+    name: "Lautsprecher aktiv"
+    id: speaker_enable
+    output: speaker_enable_output
+    restore_mode: ALWAYS_OFF
+    entity_category: config
+    icon: mdi:volume-high
+
+globals:
+  - id: last_auto_measurement_epoch
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+  - id: display_last_activity_millis
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+
+# Prüft minütlich, ob laut aktueller Tageszeit und konfiguriertem Intervall
+# eine automatische Messung fällig ist, und löst sie ggf. über denselben
+# Button aus, der auch von GPIO39 und Home Assistant genutzt wird.
+interval:
+  - interval: 60s
+    then:
+      - lambda: |-
+          if (!id(auto_measurement_enabled).state)
+            return;
+
+          auto t = id(sntp_time).now();
+          if (!t.is_valid())
+            return;
+
+          int hour = t.hour;
+          int day_start = (int) id(day_start_hour).state;
+          int day_end = (int) id(day_end_hour).state;
+          bool is_day;
+          if (day_start <= day_end) {
+            is_day = (hour >= day_start && hour < day_end);
+          } else {
+            is_day = (hour >= day_start || hour < day_end);
+          }
+
+          float interval_min = is_day ? id(interval_day_minutes).state : id(interval_night_minutes).state;
+          if (interval_min <= 0)
+            return;  // automatische Messung für diese Tageszeit deaktiviert
+
+          uint32_t now_epoch = t.timestamp;
+          uint32_t interval_s = (uint32_t) (interval_min * 60);
+
+          if (id(last_auto_measurement_epoch) == 0 ||
+              (now_epoch - id(last_auto_measurement_epoch)) >= interval_s) {
+            id(last_auto_measurement_epoch) = now_epoch;
+            id(start_measurement_button).press();
+          }
+
+# Schaltet die Hintergrundbeleuchtung nach konfigurierbarer Leerlaufzeit
+# automatisch aus - auch während einer laufenden Automatik-Messung.
+# Manuell per SELECT-Taste (togglet) wieder einschaltbar; "Display Timeout"
+# = 0 deaktiviert die Abschaltung.
+  - interval: 5s
+    then:
+      - lambda: |-
+          float timeout_min = id(display_timeout_minutes).state;
+          if (timeout_min <= 0)
+            return;
+          if (!id(display_backlight).remote_values.is_on())
+            return;
+
+          uint32_t timeout_ms = (uint32_t) (timeout_min * 60000);
+          if (millis() - id(display_last_activity_millis) > timeout_ms) {
+            id(display_backlight).turn_off().perform();
+          }
+
+sensor:
+  - platform: hilo_cuff
+    hilo_cuff_id: hilo_cuff_hub
+    systolic:
+      name: "Blutdruck systolisch"
+      id: bp_systolic
+    diastolic:
+      name: "Blutdruck diastolisch"
+      id: bp_diastolic
+    map:
+      name: "Mittlerer arterieller Druck"
+      id: bp_map
+    heart_rate:
+      name: "Herzfrequenz"
+      id: bp_heart_rate
+    battery_level:
+      name: "Manschette Akkustand"
+      id: bp_battery
+
+  # Beispiel: interner ODROID-GO-Batteriesensor (unabhängig von der Manschette)
+  - platform: adc
+    pin: GPIO36
+    name: "ODROID Akkuspannung"
+    attenuation: auto
+    update_interval: 60s
+    filters:
+      - multiply: 2.0
+
+text_sensor:
+  - platform: hilo_cuff
+    hilo_cuff_id: hilo_cuff_hub
+    measurement_status:
+      name: "Messstatus"
+      id: bp_status
+      # Signalton, sobald die Messung einen Endzustand erreicht hat -
+      # unabhängig davon, ob erfolgreich, mit Fehlercode oder Timeout.
+      on_value:
+        then:
+          - lambda: |-
+              std::string s = x;
+              if (s == "ok" || s == "timeout" || s.rfind("error", 0) == 0) {
+                id(speaker_enable).turn_on();
+                id(buzzer).play("done:d=8,o=6,b=160:c6,g6");
+              }
+
+# Start-Button als eigene Entity - dadurch automatisch auch in
+# Home Assistant als button.hilo_cuff_monitor_blutdruckmessung_starten
+# verfügbar und von dort auslösbar.
+button:
+  - platform: hilo_cuff
+    hilo_cuff_id: hilo_cuff_hub
+    id: start_measurement_button
+    name: "Blutdruckmessung starten"
+    on_press:
+      # Greift für GPIO39, Home Assistant und den Tag/Nacht-Automatik-
+      # Intervall gleichermaßen, da alle drei denselben Button auslösen.
+      then:
+        - switch.turn_on: speaker_enable
+        - rtttl.play: "start:d=8,o=6,b=160:c6"
+
+  - platform: restart
+    name: "ODROID Neustart"
+
+  # Erscheint in Home Assistant als eigene Button-Entity. Ein Button-Druck
+  # kann selbst KEINEN Browser-Download auf dem Handy/PC auslösen (das ist
+  # serverseitig grundsätzlich nicht möglich) - protokolliert aber die
+  # Download-URL, damit sie z. B. per HA-Automation (ausgelöst durch das
+  # "press"-Event dieses Buttons) als Mobile-Notification mit Tap-Aktion
+  # verschickt werden kann. Siehe README.
+  - platform: template
+    name: "CSV-Log herunterladen"
+    icon: mdi:download
+    id: csv_download_button
+    on_press:
+      then:
+        - lambda: |-
+            char ip_buf[network::IP_ADDRESS_BUFFER_SIZE];
+            network::get_ip_addresses()[0].str_to(ip_buf);
+            ESP_LOGD("main", "CSV-Download angefordert - URL: http://%s${csv_download_url}", ip_buf);
+
+# Physischer START-Taster des ODROID-GO an GPIO39.
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO39
+      mode:
+        input: true
+      inverted: true
+    name: "ODROID Start-Taste"
+    id: odroid_start_button
+    filters:
+      - delayed_on: 20ms
+    on_press:
+      then:
+        - button.press: start_measurement_button
+        - light.turn_on: display_backlight
+        - lambda: id(display_last_activity_millis) = millis();
+
+  # SELECT-Taste des ODROID-GO: schaltet die Hintergrundbeleuchtung um.
+  # GPIO27 unterstützt (anders als GPIO39) interne Pull-Widerstände.
+  - platform: gpio
+    pin:
+      number: GPIO27
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    name: "ODROID Select-Taste"
+    id: odroid_select_button
+    filters:
+      - delayed_on: 20ms
+    on_press:
+      then:
+        - light.toggle: display_backlight
+        - lambda: id(display_last_activity_millis) = millis();
+
+# --- Display: ILI9341 über mipi_spi mit WHO-Farbcodierung -----------------
+spi:
+  - id: display_spi
+    clk_pin: GPIO18
+    mosi_pin: GPIO23
+    miso_pin: GPIO19
+
+# Backlight des ODROID-GO-Displays einschalten (GPIO14), sonst bleibt
+# das Panel trotz korrekter Ansteuerung dunkel.
+output:
+  - platform: gpio
+    pin: GPIO14
+    id: display_backlight_output
+
+  # GPIO25 ist beim ODROID-GO die SPEAKER_ENABLE-Leitung des Verstärkers
+  # (muss auf HIGH stehen, damit überhaupt ein Signal durchkommt) - NICHT
+  # der Audio-Ausgang selbst. Wird nur während der Tonwiedergabe
+  # eingeschaltet (siehe switch "Lautsprecher aktiv" und rtttl.on_finished_playback
+  # weiter unten), nicht dauerhaft.
+  - platform: gpio
+    pin: GPIO25
+    id: speaker_enable_output
+
+  # Eigentliches Audiosignal: GPIO26 (der zweite ESP32-DAC-Pin neben
+  # GPIO25/DAC1, das hier als Enable-Leitung belegt ist).
+  - platform: ledc
+    pin: GPIO26
+    id: buzzer_pwm
+    max_power: 50%
+
+rtttl:
+  output: buzzer_pwm
+  id: buzzer
+  # Verstärker (GPIO25/SPEAKER_ENABLE) nur während der Wiedergabe aktiv -
+  # wird vor jedem rtttl.play/id(buzzer).play() explizit eingeschaltet
+  # (siehe on_boot, start_measurement_button, bp_status) und hier zentral
+  # wieder ausgeschaltet, sobald die jeweilige Melodie fertig ist.
+  on_finished_playback:
+    then:
+      - switch.turn_off: speaker_enable
+
+light:
+  - platform: binary
+    output: display_backlight_output
+    name: "Display Hintergrundbeleuchtung"
+    id: display_backlight
+    restore_mode: ALWAYS_ON
+
+color:
+  - id: col_green
+    red: 0%
+    green: 80%
+    blue: 0%
+  - id: col_yellow
+    red: 90%
+    green: 90%
+    blue: 0%
+  - id: col_orange
+    red: 100%
+    green: 55%
+    blue: 0%
+  - id: col_red
+    red: 100%
+    green: 0%
+    blue: 0%
+  - id: col_darkred
+    red: 60%
+    green: 0%
+    blue: 0%
+  - id: col_blue
+    red: 0%
+    green: 60%
+    blue: 100%
+  - id: col_white
+    red: 100%
+    green: 100%
+    blue: 100%
+  - id: col_black
+    red: 0%
+    green: 0%
+    blue: 0%
+
+font:
+  - file: "gfonts://Roboto"
+    id: font_large
+    size: 32
+  - file: "gfonts://Roboto"
+    id: font_medium
+    size: 20
+  - file: "gfonts://Roboto"
+    id: font_small
+    size: 14
+
+display:
+  - platform: mipi_spi
+    model: ILI9341
+    id: bp_display
+    spi_id: display_spi
+    cs_pin: GPIO5
+    dc_pin: GPIO21
+    reset_pin: GPIO4
+    rotation: 270
+    update_interval: 15s
+    data_rate: 40MHz  # ILI9341 unterstützt i. d. R. bis ~40-60 MHz - Standard
+                        # war zu konservativ, daher die "long time"-Warnung
+    lambda: |-
+      it.fill(id(col_black));
+
+      bool has_data = id(bp_systolic).has_state() && id(bp_diastolic).has_state();
+      int sys = has_data ? (int) id(bp_systolic).state : 0;
+      int dia = has_data ? (int) id(bp_diastolic).state : 0;
+
+      // Farbcodierung nach WHO/ISH-Blutdruckkategorien
+      // (Grenzwerte in mmHg; die jeweils höhere Kategorie aus Systole/Diastole zählt)
+      Color bp_color = id(col_white);
+      const char *category = "--";
+      if (has_data) {
+        if (sys < 90 || dia < 60) {
+          bp_color = id(col_blue); category = "Niedrig";
+        } else if (sys < 120 && dia < 80) {
+          bp_color = id(col_green); category = "Optimal";
+        } else if (sys < 130 && dia < 85) {
+          bp_color = id(col_green); category = "Normal";
+        } else if (sys < 140 && dia < 90) {
+          bp_color = id(col_yellow); category = "Hoch-normal";
+        } else if (sys < 160 && dia < 100) {
+          bp_color = id(col_orange); category = "Hypertonie Grad 1";
+        } else if (sys < 180 && dia < 110) {
+          bp_color = id(col_red); category = "Hypertonie Grad 2";
+        } else {
+          bp_color = id(col_darkred); category = "Hypertonie Grad 3";
+        }
+      }
+
+      it.printf(10, 5, id(font_small), id(col_blue), "Hilo Blutdruckmanschette [${mac_address}]");
+
+      if (id(sntp_time).now().is_valid()) {
+        it.strftime(10, 22, id(font_small), id(col_white), "%d.%m.%Y  %H:%M:%S", id(sntp_time).now());
+      }
+
+      if (has_data) {
+        it.printf(10, 40, id(font_large), bp_color, "%d/%d", sys, dia);
+        it.printf(10, 85, id(font_small), id(col_white), "mmHg - %s", category);
+      } else {
+        it.printf(10, 40, id(font_medium), id(col_white), "keine Messung");
+      }
+
+      if (id(bp_heart_rate).has_state()) {
+        it.printf(10, 115, id(font_medium), id(col_white), "Puls: %.0f bpm", id(bp_heart_rate).state);
+      }
+      if (id(bp_battery).has_state()) {
+        it.printf(10, 145, id(font_small), id(col_white), "Akku Manschette: %.0f %%", id(bp_battery).state);
+      }
+      if (id(bp_status).has_state()) {
+        it.printf(10, 200, id(font_small), id(col_white), "Status: %s", id(bp_status).state.c_str());
+      }
+
+      it.printf(10, 225, id(font_small), id(col_white), "Intervall Tag/Nacht: %.0f/%.0f min",
+                id(interval_day_minutes).state, id(interval_night_minutes).state);

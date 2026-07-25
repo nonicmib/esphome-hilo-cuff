@@ -1,0 +1,22 @@
+# Echte Zugangsdaten niemals einchecken - nur secrets.yaml.example gehört ins Repo
+secrets.yaml
+
+# ESPHome Build-Artefakte / Caches
+.esphome/
+build/
+
+# Kompilierte Firmware-Images
+*.bin
+*.elf
+*.map
+
+# Editor-/OS-Artefakte
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Python (falls lokal mit dem venv aus dem Original-Projekt gearbeitet wird)
+__pycache__/
+*.pyc
+venv/

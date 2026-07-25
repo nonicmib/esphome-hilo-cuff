@@ -1,0 +1,15 @@
+# ESP-IDF-Partitionstabelle für den ODROID-GO (Standard-4-MB-Layout mit
+# OTA-Unterstützung, ergänzt um eine kleine FAT/Wear-Leveling-Partition
+# "hilo_log" für das CSV-Logging der Blutdruckmessungen).
+#
+# ANNAHME: Board hat mindestens 4 MB Flash (Standard bei ODROID-GO/ESP32).
+# Falls der Build mit "partitions do not fit in flash size" fehlschlägt,
+# entweder die Größe von hilo_log reduzieren oder (falls das Board
+# tatsächlich mehr Flash hat) die App-Partitionen entsprechend vergrößern.
+#
+# Name,     Type, SubType, Offset,   Size,     Flags
+nvs,        data, nvs,     0x9000,   0x5000,
+otadata,    data, ota,     0xe000,   0x2000,
+app0,       app,  ota_0,   0x10000,  0x1C0000,
+app1,       app,  ota_1,   ,         0x1C0000,
+hilo_log,   data, fat,     ,         0x40000,
